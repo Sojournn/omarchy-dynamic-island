@@ -1,0 +1,290 @@
+#!/bin/bash
+
+# The Dynamic Island's command line, for scripts, hooks and other programs.
+# INTEGRATION.md beside the plugin is the reference; `island --help` the summary.
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  island notify <title> [text] [options]             Show an event for a moment
+  island activity start <id> <title> [text] [options]  Begin something ongoing
+  island activity update <id> [options]                Change it
+  island activity end <id>                             End it
+  island agent <name> <input|done|working|end>         A coding agent's state, from its hooks
+  island icons                                         List the icon names
+  island status                                        The island's state, as JSON
+  island ping                                          Exit 0 if an island is running
+
+Options:
+  --icon NAME       An icon by name (see `island icons`), or one glyph of your own
+  --tone TONE       accent, urgent or muted; plain when left out
+  --progress N      A level from 0 to 100, drawn as a bar or a ring
+  --duration MS     notify: how long it shows, 1500 to 10000 (default 4000)
+  --id ID           notify: events with the same id replace each other
+  --title TEXT      activity update: a new title
+  --text TEXT       activity update: new text
+  --window WHICH    activity: `auto` for the terminal this runs in, or an address;
+                    clicking the activity goes there, and closing it ends it
+  --ttl SECONDS     activity: forget it after this long without an update (default 600)
+
+Exit status:
+  0  the island took it
+  1  it did not: no island is running, none is free to show it, or the id is unknown
+  2  the command was not understood
+
+  island notify "Build finished" || omarchy-notification-send "Build finished"
+USAGE
+}
+
+fail_usage() {
+  echo "island: $*" >&2
+  echo "Try: island --help" >&2
+  exit 2
+}
+
+# Sends one call to the island and prints its answer. Fails when no shell, or
+# no island in it, is there to answer.
+call() {
+  omarchy-shell island "$@" 2>/dev/null
+}
+
+# What the island said, as an exit status.
+settle() {
+  case $1 in
+  shown | ok) exit 0 ;;
+  invalid:*)
+    echo "island: ${1#invalid: }" >&2
+    exit 2
+    ;;
+  *) exit 1 ;;
+  esac
+}
+
+# The processes above this one, nearest first.
+ancestors=()
+read_ancestors() {
+  local pid=$PPID stat
+  ancestors=()
+  while [[ $pid =~ ^[0-9]+$ ]] && ((pid > 1)) && ((${#ancestors[@]} < 32)); do
+    ancestors+=("$pid")
+    stat=$(<"/proc/$pid/stat") 2>/dev/null || break
+    # Past the command name, which may itself hold spaces and parentheses.
+    stat=${stat##*) }
+    read -r _ pid _ <<<"$stat"
+  done
+}
+
+# The terminal this runs in: the nearest ancestor process that owns exactly
+# one Hyprland window. A terminal that keeps several windows in one process
+# cannot be told apart this way, and nothing is printed for it.
+terminal_window() {
+  local clients pid matches
+  clients=$(hyprctl clients -j 2>/dev/null) || return 0
+  for pid in "${ancestors[@]}"; do
+    matches=$(jq -r --argjson pid "$pid" '[.[] | select(.pid == $pid) | .address] | @tsv' <<<"$clients" 2>/dev/null)
+    if [[ -n $matches ]]; then
+      [[ $matches != *$'\t'* ]] && printf '%s' "$matches"
+      return 0
+    fi
+  done
+}
+
+is_number() {
+  [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
+
+# ------------------------------------------------------------------ options
+
+title="" text="" icon="" tone="" progress="" duration="" id="" window="" ttl=""
+title_set=0 text_set=0 window_set=0
+positional=()
+
+parse_options() {
+  while (($#)); do
+    case $1 in
+    --icon | --tone | --progress | --duration | --id | --title | --text | --window | --ttl)
+      (($# >= 2)) || fail_usage "$1 needs a value"
+      case $1 in
+      --icon) icon=$2 ;;
+      --tone) tone=$2 ;;
+      --progress) is_number "$2" || fail_usage "--progress takes a number from 0 to 100"; progress=$2 ;;
+      --duration) is_number "$2" || fail_usage "--duration takes milliseconds"; duration=$2 ;;
+      --id) id=$2 ;;
+      --title) title=$2 title_set=1 ;;
+      --text) text=$2 text_set=1 ;;
+      --window) window=$2 window_set=1 ;;
+      --ttl) is_number "$2" || fail_usage "--ttl takes seconds"; ttl=$2 ;;
+      esac
+      shift 2
+      ;;
+    --)
+      shift
+      positional+=("$@")
+      break
+      ;;
+    --*) fail_usage "unknown option: $1" ;;
+    *)
+      positional+=("$1")
+      shift
+      ;;
+    esac
+  done
+}
+
+# ----------------------------------------------------------------- commands
+
+command_notify() {
+  parse_options "$@"
+  ((${#positional[@]} >= 1 && ${#positional[@]} <= 2)) || fail_usage "notify takes a title and, optionally, text"
+  local payload
+  payload=$(jq -cn \
+    --arg title "${positional[0]}" --arg text "${positional[1]-}" --arg icon "$icon" --arg tone "$tone" \
+    --arg id "$id" --arg duration "$duration" --arg progress "$progress" '
+      {title: $title}
+      + (if $text == "" then {} else {text: $text} end)
+      + (if $icon == "" then {} else {icon: $icon} end)
+      + (if $tone == "" then {} else {tone: $tone} end)
+      + (if $id == "" then {} else {id: $id} end)
+      + (if $duration == "" then {} else {duration: ($duration | tonumber)} end)
+      + (if $progress == "" then {} else {progress: ($progress | tonumber)} end)') || exit 2
+  settle "$(call notify "$payload")"
+}
+
+command_activity() {
+  local state=${1-}
+  [[ $state == start || $state == update || $state == end ]] || fail_usage "activity takes start, update or end"
+  shift
+  parse_options "$@"
+  ((${#positional[@]} >= 1)) || fail_usage "activity $state needs an id"
+  local activity=${positional[0]}
+
+  case $state in
+  start)
+    ((${#positional[@]} >= 2 && ${#positional[@]} <= 3)) || fail_usage "activity start takes an id, a title and, optionally, text"
+    title=${positional[1]} title_set=1
+    if ((${#positional[@]} == 3)); then text=${positional[2]} text_set=1; fi
+    ;;
+  *)
+    ((${#positional[@]} == 1)) || fail_usage "activity $state takes an id; use --title and --text to change them"
+    ;;
+  esac
+
+  if ((window_set)); then
+    case $window in
+    auto)
+      read_ancestors
+      window=$(terminal_window)
+      ;;
+    none) window="" ;;
+    esac
+  fi
+
+  local payload
+  payload=$(jq -cn \
+    --arg id "$activity" --arg state "$state" --arg title "$title" --arg text "$text" --arg icon "$icon" \
+    --arg tone "$tone" --arg progress "$progress" --arg window "$window" --arg ttl "$ttl" \
+    --argjson titleSet "$title_set" --argjson textSet "$text_set" --argjson windowSet "$window_set" '
+      {id: $id, state: $state}
+      + (if $titleSet == 1 then {title: $title} else {} end)
+      + (if $textSet == 1 then {text: $text} else {} end)
+      + (if $icon == "" then {} else {icon: $icon} end)
+      + (if $tone == "" then {} else {tone: $tone} end)
+      + (if $progress == "" then {} else {progress: ($progress | tonumber)} end)
+      + (if $windowSet == 1 then {window: $window} else {} end)
+      + (if $ttl == "" then {} else {ttl: ($ttl | tonumber)} end)') || exit 2
+  settle "$(call activity "$payload")"
+}
+
+# A coding agent's state. Claude Code hands its hook a JSON object on stdin;
+# Codex appends one as the last argument (`island agent codex notify '<json>'`).
+# A hook must never hold its agent up or talk back to it, so this prints
+# nothing, does its work in the background, and always exits 0.
+command_agent() {
+  local agent=${1-} event=${2-} extra=${3-}
+  if [[ -z $agent || -z $event ]]; then
+    echo "Usage: island agent <name> <input|done|working|end>" >&2
+    exit 2
+  fi
+
+  # The hook's JSON, if it was piped in. Bounded, and not waited on for long.
+  local input=""
+  if [[ ! -t 0 ]]; then
+    input=$(timeout 1 head -c 65536 2>/dev/null || true)
+  fi
+
+  # Read now: by the time the background work runs, the shell that ran this
+  # hook may be gone.
+  read_ancestors
+
+  {
+    json=${input:-$extra}
+
+    field() {
+      [[ -n $json ]] || return 0
+      jq -r --arg key "$1" 'if type == "object" then (.[$key] // "") | tostring else "" end' <<<"$json" 2>/dev/null | head -c 400
+    }
+
+    # Codex runs its notify program for more than one thing; a finished turn
+    # is the one that means the agent is done.
+    if [[ $event == "notify" ]]; then
+      [[ $(field type) == "agent-turn-complete" ]] || exit 0
+      event="done"
+    fi
+
+    # Claude Code also notifies about things that are not a wait for the user.
+    if [[ $event == "input" && $(field notification_type) == "auth_success" ]]; then
+      exit 0
+    fi
+
+    cwd=$(field cwd)
+    [[ -n $cwd ]] || cwd=$PWD
+
+    payload=$(jq -cn \
+      --arg state "$event" \
+      --arg agent "$agent" \
+      --arg window "$(terminal_window)" \
+      --arg project "${cwd##*/}" \
+      --arg detail "$(field message)" \
+      --arg session "$(field session_id)" \
+      '{state: $state, agent: $agent, window: $window, project: $project, detail: $detail, session: $session}') || exit 0
+
+    omarchy-shell -q island agent "$payload"
+  } >/dev/null 2>&1 &
+
+  exit 0
+}
+
+case ${1-} in
+notify)
+  shift
+  command_notify "$@"
+  ;;
+activity)
+  shift
+  command_activity "$@"
+  ;;
+agent)
+  shift
+  command_agent "$@"
+  ;;
+icons)
+  names=$(call icons) || exit 1
+  tr ' ' '\n' <<<"$names"
+  ;;
+status)
+  call status || exit 1
+  ;;
+ping)
+  [[ $(call ping) == "ok" ]]
+  ;;
+-h | --help | help)
+  usage
+  ;;
+"")
+  usage >&2
+  exit 2
+  ;;
+*)
+  fail_usage "unknown command: $1"
+  ;;
+esac

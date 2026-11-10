@@ -1,0 +1,9 @@
+#!/bin/bash
+
+# A coding agent's state, for the Dynamic Island:
+#
+#   island-agent <agent> <input|done|working|end>
+#   island-agent <agent> notify '<json>'          # Codex's `notify` program
+#
+# This is `island agent` under the name agents' hooks already call.
+exec "$(dirname "$(readlink -f "$0")")/island" agent "$@"
