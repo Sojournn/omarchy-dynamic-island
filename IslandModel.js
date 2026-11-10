@@ -58,7 +58,10 @@ var glyphs = {
   bluetoothOff: glyph(0xF00B2),
   bell: glyph(0xF009A),
   bellRing: glyph(0xF009E),
-  robot: glyph(0xF06A9)
+  robot: glyph(0xF06A9),
+  video: glyph(0xF0567),
+  batteryAlert: glyph(0xF0083),
+  swap: glyph(0xF04E1)
 }
 
 // The icons other programs may ask for by name. Each is the Material Design
@@ -169,6 +172,7 @@ function isPlainObject(value) {
 //   timerNotify               also send a desktop notification when done
 //   osd                       show volume and brightness changes in the island
 //   battery                   announce plugging in, unplugging and a full charge
+//   batteryLow                percentages at which a draining battery warns
 //   bluetooth                 announce devices connecting and disconnecting
 //   dictation                 show Superwhisper recording and transcribing
 //   reminders                 show Omarchy reminders
@@ -176,6 +180,9 @@ function isPlainObject(value) {
 //   reminderPresets           minutes offered on the reminders page
 //   agents                    show coding agents that finished or need input
 //   integrations              let other programs show events and activities
+//   microphone                mark the island while an app has the microphone
+//   camera                    mark the island while a program has the camera
+//   privacyIgnore             programs that never count as using either
 var DEFAULTS = {
   notchWidth: 0,
   notchHeight: 0,
@@ -191,13 +198,17 @@ var DEFAULTS = {
   timerNotify: true,
   osd: true,
   battery: true,
+  batteryLow: [20, 10],
   bluetooth: true,
   dictation: true,
   reminders: true,
   reminderLead: 10,
   reminderPresets: [5, 15, 30, 60],
   agents: true,
-  integrations: true
+  integrations: true,
+  microphone: true,
+  camera: true,
+  privacyIgnore: []
 }
 
 function boolSetting(value, fallback) {
@@ -217,6 +228,30 @@ function normalizePresets(value, fallback) {
   return out.length > 0 ? out : defaults.slice()
 }
 
+// Battery levels to warn at, highest first. Unlike the presets, an empty list
+// is an answer: it turns the warning off.
+function normalizeLevels(value, fallback) {
+  if (!Array.isArray(value)) return fallback.slice()
+  var out = []
+  for (var i = 0; i < value.length && out.length < 4; i++) {
+    var level = typeof value[i] === "number" && isFinite(value[i]) ? Math.round(value[i]) : 0
+    if (level >= 1 && level <= 99 && out.indexOf(level) === -1) out.push(level)
+  }
+  return out.sort(function(a, b) { return b - a })
+}
+
+// Program names, lowercased, as they are matched in privacyIgnore.
+function normalizeNames(value) {
+  if (!Array.isArray(value)) return []
+  var out = []
+  for (var i = 0; i < value.length && out.length < 16; i++) {
+    if (typeof value[i] !== "string") continue
+    var name = displayText(value[i], 40).toLowerCase()
+    if (name !== "" && out.indexOf(name) === -1) out.push(name)
+  }
+  return out
+}
+
 function normalizeSettings(raw) {
   var entry = isPlainObject(raw) ? raw : {}
   return {
@@ -234,13 +269,17 @@ function normalizeSettings(raw) {
     timerNotify: boolSetting(entry.timerNotify, DEFAULTS.timerNotify),
     osd: boolSetting(entry.osd, DEFAULTS.osd),
     battery: boolSetting(entry.battery, DEFAULTS.battery),
+    batteryLow: normalizeLevels(entry.batteryLow, DEFAULTS.batteryLow),
     bluetooth: boolSetting(entry.bluetooth, DEFAULTS.bluetooth),
     dictation: boolSetting(entry.dictation, DEFAULTS.dictation),
     reminders: boolSetting(entry.reminders, DEFAULTS.reminders),
     reminderLead: Math.round(clampNumber(entry.reminderLead, 0, 24 * 60, DEFAULTS.reminderLead)),
     reminderPresets: normalizePresets(entry.reminderPresets, DEFAULTS.reminderPresets),
     agents: boolSetting(entry.agents, DEFAULTS.agents),
-    integrations: boolSetting(entry.integrations, DEFAULTS.integrations)
+    integrations: boolSetting(entry.integrations, DEFAULTS.integrations),
+    microphone: boolSetting(entry.microphone, DEFAULTS.microphone),
+    camera: boolSetting(entry.camera, DEFAULTS.camera),
+    privacyIgnore: normalizeNames(entry.privacyIgnore)
   }
 }
 
@@ -356,6 +395,14 @@ function displayText(text, maxLength) {
     .replace(/\s+/g, " ")
     .trim()
   return out.length > limit ? out.slice(0, limit).trim() : out
+}
+
+// A label cut to at most `maxLength` characters, the last an ellipsis when
+// something was left off.
+function shortLabel(text, maxLength) {
+  var limit = Math.max(2, maxLength || 12)
+  var out = displayText(text, 400)
+  return out.length > limit ? out.slice(0, limit - 1).trim() + "\u2026" : out
 }
 
 // A label fit to hand to another program as well: it never starts with a
@@ -558,9 +605,10 @@ function isProxyPlayer(player) {
   return dbusName.indexOf("playerctld") !== -1 || desktopEntry === "playerctld"
 }
 
-// The player the island follows: the one playing (the one last used, if
-// several are), else the one last used, else any holding a track.
-function pickPlayer(players, lastKey) {
+// The player the island follows: the one picked by hand, else the one playing
+// (the one last used, if several are), else the one last used, else any
+// holding a track.
+function pickPlayer(players, lastKey, chosenKey) {
   var count = players && players.length ? players.length : 0
   var best = null
   var bestScore = 0
@@ -568,6 +616,7 @@ function pickPlayer(players, lastKey) {
     var player = players[i]
     if (!player || !hasTrack(player)) continue
     var score = 1
+    if (chosenKey && playerKey(player) === chosenKey) score += 16
     if (player.isPlaying) score += 8
     if (lastKey && playerKey(player) === lastKey) score += 4
     if (!isProxyPlayer(player)) score += 2
@@ -577,6 +626,48 @@ function pickPlayer(players, lastKey) {
     }
   }
   return best
+}
+
+// The players there are to switch between, by key: each one holding a track,
+// without the proxy that only mirrors another unless it is all there is.
+function playerChoices(players) {
+  var count = players && players.length ? players.length : 0
+  var real = []
+  var proxies = []
+  for (var i = 0; i < count; i++) {
+    var player = players[i]
+    var key = playerKey(player)
+    if (!player || !hasTrack(player) || key === "") continue
+    var list = isProxyPlayer(player) ? proxies : real
+    if (list.indexOf(key) === -1) list.push(key)
+  }
+  return real.length > 0 ? real : proxies
+}
+
+// The keys of the players that are playing, for telling when one starts.
+function playingKeys(players) {
+  var count = players && players.length ? players.length : 0
+  var out = []
+  for (var i = 0; i < count; i++) {
+    var key = playerKey(players[i])
+    if (players[i] && players[i].isPlaying && key !== "" && out.indexOf(key) === -1) out.push(key)
+  }
+  return out
+}
+
+// Whether a player picked by hand is still the one to follow. It is until it
+// is gone, or until some other player starts while it sits silent: pressing
+// play somewhere else is a newer wish than the pick was.
+function chosenPlayer(chosenKey, choices, previousPlaying, nowPlaying) {
+  var chosen = String(chosenKey || "")
+  if (chosen === "" || !Array.isArray(choices) || choices.indexOf(chosen) === -1) return ""
+  var playing = Array.isArray(nowPlaying) ? nowPlaying : []
+  var before = Array.isArray(previousPlaying) ? previousPlaying : []
+  if (playing.indexOf(chosen) !== -1) return chosen
+  for (var i = 0; i < playing.length; i++) {
+    if (before.indexOf(playing[i]) === -1) return ""
+  }
+  return chosen
 }
 
 // One bar's height in the equalizer at an animation step, 0.25 to 1. It is a
@@ -730,14 +821,202 @@ function osdEvent(payloadJson) {
 // ---------------------------------------------------------------- battery
 
 // What changed between two readings of the battery, each
-// { present, onBattery, full, percent }: "plugged", "unplugged" or "charged".
-// Plugging in a battery that is already full is one event, not two.
-function batteryEvents(previous, next) {
+// { present, onBattery, full, percent }: "plugged", "unplugged", "charged" or
+// "low". Plugging in a battery that is already full is one event, not two.
+// "low" is a battery draining past one of `lowLevels`; passing several of
+// them at once, as a laptop waking from sleep can, is still one warning.
+function batteryEvents(previous, next, lowLevels) {
   if (!previous || !next || !previous.present || !next.present) return []
   if (previous.onBattery && !next.onBattery) return ["plugged"]
   if (!previous.onBattery && next.onBattery) return ["unplugged"]
   if (!next.onBattery && !previous.full && next.full) return ["charged"]
+  if (next.onBattery && Array.isArray(lowLevels) && previous.percent >= 0 && next.percent >= 0) {
+    for (var i = 0; i < lowLevels.length; i++) {
+      if (previous.percent > lowLevels[i] && next.percent <= lowLevels[i]) return ["low"]
+    }
+  }
   return []
+}
+
+// ---------------------------------------------------------------- privacy
+
+// Which programs have the microphone or the camera, worked out from what
+// PipeWire and /proc report. Everything named here comes from other programs,
+// so it is bounded and drawn as plain text like any other label.
+
+// The nodes a platform's audio processing adds, which its package lists in
+// /usr/share/omarchy-platform/audio.json:
+//
+//   { "hidden": ["<pattern>", ...],
+//     "replaced": [{ "node": "<pattern>", "by": "<pattern>" }, ...] }
+//
+// A pattern is a regular expression for a whole node name. A MacBook's
+// microphone runs through two such nodes that record all the time; they are
+// not somebody listening. Missing or malformed text means no hints.
+function wholeName(pattern) {
+  if (typeof pattern !== "string" || pattern === "" || pattern.length > 200) return null
+  try {
+    return new RegExp("^(?:" + pattern + ")$")
+  } catch (error) {
+    return null
+  }
+}
+
+function parseAudioHints(text) {
+  var hints = { hidden: [], replaced: [] }
+  var data = null
+  try {
+    data = JSON.parse(String(text || ""))
+  } catch (error) {
+    return hints
+  }
+  if (!isPlainObject(data)) return hints
+  var hidden = Array.isArray(data.hidden) ? data.hidden : []
+  for (var i = 0; i < hidden.length && hints.hidden.length < 64; i++) {
+    var pattern = wholeName(hidden[i])
+    if (pattern) hints.hidden.push(pattern)
+  }
+  var replaced = Array.isArray(data.replaced) ? data.replaced : []
+  for (var j = 0; j < replaced.length && hints.replaced.length < 64; j++) {
+    if (!isPlainObject(replaced[j])) continue
+    var node = wholeName(replaced[j].node)
+    var by = wholeName(replaced[j].by)
+    if (node && by) hints.replaced.push({ node: node, by: by })
+  }
+  return hints
+}
+
+// Whether the hints hide a node, given the name of every node in the graph.
+function audioHidden(name, hints, nodeNames) {
+  var value = String(name || "")
+  if (value === "" || !hints) return false
+  var hidden = hints.hidden || []
+  for (var i = 0; i < hidden.length; i++) {
+    if (hidden[i].test(value)) return true
+  }
+  var replaced = hints.replaced || []
+  var names = Array.isArray(nodeNames) ? nodeNames : []
+  for (var j = 0; j < replaced.length; j++) {
+    if (!replaced[j].node.test(value)) continue
+    for (var k = 0; k < names.length; k++) {
+      var other = String(names[k] || "")
+      if (other !== value && replaced[j].by.test(other)) return true
+    }
+  }
+  return false
+}
+
+// Programs that open the microphone to draw a level, not to listen: the
+// shell's own meters and the usual mixers.
+var LEVEL_METERS = ["quickshell", "quickshell-peak-monitor", "pavucontrol", "pwvucontrol", "peak detect"]
+
+// Names people know programs by, where the name a program reports is not it.
+// A process name is cut off at fifteen characters, hence the short ones.
+var APP_LABELS = {
+  "chrome": "Chrome", "google chrome": "Chrome", "chromium": "Chromium", "firefox": "Firefox",
+  "brave": "Brave", "zen": "Zen", "obs": "OBS", "ffmpeg": "FFmpeg", "zoom": "Zoom",
+  "gpu-screen-recorder": "Screen recorder", "gpu-screen-reco": "Screen recorder",
+  "wf-recorder": "Screen recorder", "webrtc voiceengine": "Browser"
+}
+
+// A program's name as people would say it.
+function appLabel(name) {
+  var text = displayText(name, 80)
+  // A path to a program is the program.
+  if (text.charAt(0) === "/") text = text.split("/").pop()
+  text = text.replace(/\s+(input|capture)$/i, "").replace(/^ALSA plug-in \[(.+)\]$/i, "$1")
+  var known = APP_LABELS[text.toLowerCase()]
+  if (known) return known
+  // A bare lowercase word is a program's file name; it reads better capitalized.
+  if (/^[a-z][a-z0-9]*$/.test(text)) text = text.charAt(0).toUpperCase() + text.slice(1)
+  return displayText(text, 24)
+}
+
+// Whether any of a program's names matches one of `ignore` (lowercase; a
+// match anywhere in a name counts, so "zoom" covers "ZOOM VoiceEngine").
+function ignoresApp(names, ignore) {
+  var list = Array.isArray(ignore) ? ignore : []
+  for (var i = 0; i < names.length; i++) {
+    var name = String(names[i] || "").toLowerCase()
+    if (name === "") continue
+    for (var j = 0; j < list.length; j++) {
+      if (list[j] !== "" && name.indexOf(list[j]) !== -1) return true
+    }
+  }
+  return false
+}
+
+function pushLabel(labels, label) {
+  if (labels.indexOf(label) === -1 && labels.length < 6) labels.push(label)
+}
+
+// The programs recording from a microphone, by label, given the capture
+// streams in the audio graph: { name, app, binary, media, captureSink,
+// fromSink, linked }. Left out are the platform's own processing, one half
+// of a loopback or filter (linked), level meters, a stream recording what
+// the speakers play (captureSink, or fed by a sink), and whatever the user
+// listed. A stream that names no program still counts,
+// under an empty label: something is listening, whoever it is.
+function microphoneApps(streams, hints, nodeNames, ignore) {
+  var list = Array.isArray(streams) ? streams : []
+  var labels = []
+  for (var i = 0; i < list.length; i++) {
+    var stream = list[i]
+    if (!stream) continue
+    var names = [stream.name, stream.app, stream.binary, stream.media]
+    if (stream.captureSink === true || stream.fromSink === true || stream.linked === true) continue
+    if (audioHidden(stream.name, hints, nodeNames)) continue
+    if (ignoresApp(names, LEVEL_METERS) || ignoresApp(names, ignore)) continue
+    pushLabel(labels, appLabel(stream.app || stream.binary || ""))
+  }
+  return labels
+}
+
+// One line from bin/island-camera-watch: the names of the programs holding a
+// camera open, separated by tabs. An empty line is a camera nobody has.
+function cameraHolders(line) {
+  var parts = String(line === undefined || line === null ? "" : line).slice(0, 2048).split("\t")
+  var out = []
+  for (var i = 0; i < parts.length && out.length < 8; i++) {
+    var name = displayText(parts[i], 40)
+    if (name !== "" && out.indexOf(name) === -1) out.push(name)
+  }
+  return out
+}
+
+// The programs using the camera, by label. A program that reaches the camera
+// through PipeWire shows up in /proc as PipeWire itself; the video streams in
+// the graph (`viaPipewire`, by name) say who is behind it, when they say.
+function cameraApps(holders, viaPipewire, ignore) {
+  var held = Array.isArray(holders) ? holders : []
+  var streams = Array.isArray(viaPipewire) ? viaPipewire : []
+  var labels = []
+  for (var i = 0; i < held.length; i++) {
+    var name = String(held[i] || "")
+    if (name === "" || ignoresApp([name], ignore)) continue
+    var lower = name.toLowerCase()
+    if (lower === "pipewire" || lower === "wireplumber" || lower === "pipewire-media-session") {
+      var named = 0
+      for (var j = 0; j < streams.length; j++) {
+        if (!streams[j] || ignoresApp([streams[j]], ignore)) continue
+        pushLabel(labels, appLabel(streams[j]))
+        named++
+      }
+      if (named === 0) pushLabel(labels, "")
+    } else {
+      pushLabel(labels, appLabel(name))
+    }
+  }
+  return labels
+}
+
+// The first program with a name among `labels`, for saying who it is.
+function firstLabel(labels) {
+  var list = Array.isArray(labels) ? labels : []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i]) return list[i]
+  }
+  return ""
 }
 
 // ---------------------------------------------------------------- dictation
@@ -1098,6 +1377,7 @@ if (typeof module !== "undefined") {
     fullscreenOn: fullscreenOn,
     displayText: displayText,
     plainLabel: plainLabel,
+    shortLabel: shortLabel,
     notificationLiteral: notificationLiteral,
     timerNotification: timerNotification,
     safeArtUrl: safeArtUrl,
@@ -1116,6 +1396,17 @@ if (typeof module !== "undefined") {
     hasTrack: hasTrack,
     isProxyPlayer: isProxyPlayer,
     pickPlayer: pickPlayer,
+    playerChoices: playerChoices,
+    playingKeys: playingKeys,
+    chosenPlayer: chosenPlayer,
+    parseAudioHints: parseAudioHints,
+    audioHidden: audioHidden,
+    appLabel: appLabel,
+    ignoresApp: ignoresApp,
+    microphoneApps: microphoneApps,
+    cameraHolders: cameraHolders,
+    cameraApps: cameraApps,
+    firstLabel: firstLabel,
     barLevel: barLevel,
     liveOrder: liveOrder,
     nextCompact: nextCompact,

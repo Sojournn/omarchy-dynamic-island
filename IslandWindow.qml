@@ -12,6 +12,7 @@ import "views"
 // One screen's island: a black shape hung from the top edge over the notch.
 //
 //   idle      a little smaller than the notch, so it is all behind the camera
+//   indicator just wider than the notch, to carry a microphone or camera mark
 //   compact   as tall as the notch and wider, an activity showing either side
 //   event     the same, for a moment, showing something that just happened
 //   expanded  grown downward into a page of controls
@@ -73,17 +74,25 @@ PanelWindow {
   // Opened by the pointer resting on this island.
   property bool hoverExpanded: false
   readonly property bool expanded: island.pinned || island.alerting || hoverExpanded
+  // A microphone or a camera in use. Each is a small mark at one end of the
+  // island for as long as it lasts, whatever else the island is showing.
+  readonly property bool microphoneOn: settings.microphone && island.privacy.microphoneOn
+  readonly property bool cameraOn: settings.camera && island.privacy.cameraOn
+  readonly property bool marked: microphoneOn || cameraOn
+
   readonly property string mode: fullscreen ? "hidden"
     : island.calibrating ? "calibrate"
     : expanded ? "expanded"
     : island.event ? "event"
     : island.compactId !== "" ? "compact"
+    : marked ? "indicator"
     : "idle"
 
   // Whether this island is free to show an event: on a notch, in view, and
   // not open on a page. The service reads it to decide whether the island or
   // the on-screen display answers the volume keys.
-  readonly property bool eventReady: cutout > 0 && (mode === "idle" || mode === "compact" || mode === "event")
+  readonly property bool eventReady: cutout > 0
+    && (mode === "idle" || mode === "indicator" || mode === "compact" || mode === "event")
   readonly property string screenName: screen ? String(screen.name) : ""
 
   function reportReady() {
@@ -140,6 +149,11 @@ PanelWindow {
     else if (!expanded) open()
   }
 
+  // A middle click anywhere on the island plays or pauses the music.
+  function middleTapped() {
+    if (mode !== "calibrate" && island.media.available) island.media.toggle()
+  }
+
   property real wheelRemainder: 0
 
   function wheeled(delta) {
@@ -176,6 +190,20 @@ PanelWindow {
   readonly property real idleH: Math.max(0, notchH - 4)
   readonly property real expandedW: Math.max(settings.expandedWidth, notchW + 2 * 104)
 
+  // Where a mark sits: this far in from an end of the island. An island that
+  // is showing something moves it inward by `gutter` to make the room; one
+  // that is not grows `markWing` past the notch to have somewhere to put it.
+  readonly property int markSize: 6
+  readonly property int markInset: 5
+  readonly property int markWing: 16
+  readonly property real gutter: marked && (mode === "compact" || mode === "event") ? 10 : 0
+  property real inset: gutter
+
+  Behavior on inset {
+    enabled: win.ready
+    NumberAnimation { duration: Style.duration(220); easing.type: Easing.Bezier; easing.bezierCurve: Style.easeOut }
+  }
+
   readonly property var compactView: island.compactId === "media" ? mediaCompact
     : island.compactId === "timer" ? timerCompact
     : island.compactId === "recording" ? recordingCompact
@@ -192,12 +220,13 @@ PanelWindow {
     : timerPage
 
   readonly property real targetW: mode === "expanded" ? expandedW
-    : mode === "compact" && compactView ? notchW + 2 * compactView.wing
-    : mode === "event" ? notchW + 2 * eventCompact.wing
+    : mode === "compact" && compactView ? notchW + 2 * (compactView.wing + gutter)
+    : mode === "event" ? notchW + 2 * (eventCompact.wing + gutter)
     : mode === "calibrate" ? notchW + 2 * 118
+    : mode === "indicator" ? notchW + 2 * markWing
     : idleW
   readonly property real targetH: mode === "expanded" ? pageTop + page.implicitHeight + pad
-    : mode === "compact" || mode === "event" || mode === "calibrate" ? notchH
+    : mode === "compact" || mode === "event" || mode === "calibrate" || mode === "indicator" ? notchH
     : idleH
   readonly property real targetRadius: mode === "expanded" ? 30 : 11
 
@@ -258,6 +287,21 @@ PanelWindow {
 
   // The first pages sit left of the notch and the rest right of it.
   readonly property int leftTabs: 3
+
+  // A microphone or camera mark: a steady dot, there for as long as the use.
+  component Mark: Rectangle {
+    property bool on: false
+
+    y: (win.notchH - height) / 2
+    width: win.markSize
+    height: win.markSize
+    radius: win.markSize / 2
+    opacity: on && win.mode !== "calibrate" ? 1 : 0
+
+    Behavior on opacity {
+      NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic }
+    }
+  }
 
   // A page tab in the strip beside the notch. A dot marks a live activity.
   component Tab: Item {
@@ -324,6 +368,11 @@ PanelWindow {
       onTapped: win.tapped()
     }
 
+    TapHandler {
+      acceptedButtons: Qt.MiddleButton
+      onTapped: win.middleTapped()
+    }
+
     WheelHandler {
       acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
       onWheel: function(event) { win.wheeled(event.angleDelta.y) }
@@ -386,10 +435,27 @@ PanelWindow {
       anchors.fill: parent
       clip: true
 
+      // ------------------------------------------------------------- marks
+
+      Mark {
+        anchors.left: parent.left
+        anchors.leftMargin: win.markInset
+        on: win.microphoneOn
+        color: win.island.microphoneColor
+      }
+
+      Mark {
+        anchors.right: parent.right
+        anchors.rightMargin: win.markInset
+        on: win.cameraOn
+        color: win.island.cameraColor
+      }
+
       // ----------------------------------------------------------- compact
 
       Item {
-        width: parent.width
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: parent.width - 2 * win.inset
         height: win.notchH
 
         MediaCompact {

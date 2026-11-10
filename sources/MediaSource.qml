@@ -16,7 +16,24 @@ Item {
   // The player last seen playing, so it is the one that stays when it pauses
   // or when two play at once.
   property string lastKey: ""
-  readonly property var player: Model.pickPlayer(players, lastKey)
+  // The player picked by hand on the music page, when there are several.
+  property string chosenKey: ""
+  readonly property var player: Model.pickPlayer(players, lastKey, chosenKey)
+
+  // The players there are to switch between, by key.
+  readonly property var choices: Model.playerChoices(players)
+  readonly property var playingKeys: Model.playingKeys(players)
+  property var previousPlaying: []
+
+  // A pick lasts until its player goes, or another starts while it is silent.
+  onPlayingKeysChanged: {
+    chosenKey = Model.chosenPlayer(chosenKey, choices, previousPlaying, playingKeys)
+    previousPlaying = playingKeys
+  }
+
+  function switchPlayer(delta) {
+    if (choices.length > 1) chosenKey = Model.cycle(choices, Model.playerKey(player), delta)
+  }
 
   readonly property bool available: player !== null
   readonly property bool playing: !!player && player.isPlaying === true

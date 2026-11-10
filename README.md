@@ -9,6 +9,8 @@ the notch, so it reads as one piece with the camera housing:
   either side of the camera.
 - **An event**, something that just happened, takes the compact island for a
   moment and then hands it back.
+- **A mark**, a small dot at one end, says a program has the microphone
+  (orange) or the camera (green) for as long as it does.
 - **Expanded** it grows downward into a page of controls.
 
 > **Needs a MacBook with a notch.** The island lives on the camera cutout of
@@ -37,8 +39,8 @@ other plugins can put their own events and activities on it: see
   not appear.
 - **Omarchy 4.5 or later**, with its Quickshell shell and Hyprland.
 - **Nothing else to install.** The plugin uses `jq`, `inotifywait`
-  (inotify-tools) and `setpriv` (util-linux), which Omarchy already has, and
-  Omarchy's own commands: `omarchy-shell`, `omarchy-reminder`,
+  (inotify-tools), `setpriv` (util-linux), `find` and `udevadm`, which Omarchy
+  already has, and Omarchy's own commands: `omarchy-shell`, `omarchy-reminder`,
   `omarchy-capture-screenrecording` and `omarchy-notification-send`.
 - **Optional:** [Superwhisper](https://superwhisper.com) for the dictation
   indicator, and a coding agent with hooks (Claude Code, Codex) for agent
@@ -56,8 +58,8 @@ The last command lines the island up with your notch (see
 [Lining it up with the notch](#lining-it-up-with-the-notch)). Omarchy puts the
 plugin in `~/.config/omarchy/plugins/io.github.sojournn.dynamic-island/`.
 
-Music, the timer, screen recording, reminders, battery, Bluetooth and
-Superwhisper work from there. Two things need a step of their own, because
+Music, the timer, screen recording, reminders, battery, Bluetooth,
+Superwhisper and the microphone and camera marks work from there. Two things need a step of their own, because
 they live outside the plugin: [volume and brightness](#volume-and-brightness)
 and [agents](#agents).
 
@@ -82,7 +84,7 @@ Live for as long as they last, most important first:
 | Other programs' activities | their icon, in a ring when they report a progress, and that progress, their text, or the time they have run | each one with its progress; click one to go to its window |
 | Timer | a ring that empties and the time left | set and start a timer; pause, +1m, cancel; "Time's up" when it ends |
 | Reminders | a bell and the time left, once the next reminder is within ten minutes | the next three Omarchy reminders; add one, clear them |
-| Music (MPRIS) | cover and an equalizer; the title and artist peek out when the track changes | cover, title, artist, a seekable progress line, previous / play-pause / next |
+| Music (MPRIS) | cover and an equalizer; the title and artist peek out when the track changes | cover, title, artist, a seekable progress line, previous / play-pause / next; with more than one player about, a button naming this one that moves to the next |
 
 The compact island keeps showing what it is showing. Something that goes live
 takes it over only if it matters at least as much: a timer starting takes the
@@ -97,14 +99,44 @@ Shown for a few seconds, one at a time:
 |---|---|
 | Volume, brightness, keyboard backlight | the glyph, the level, and a bar |
 | Charger in, charger out, charge complete | "Charging 54%", "On battery 54%", "Charged 100%" |
+| The battery drains to 20%, then 10% | "Low battery 20%", in red |
+| A program starts using the microphone or camera | its name and "Microphone" or "Camera"; the mark stays after |
 | Bluetooth device connects or disconnects | its name, and its battery level when it reports one |
 | A reminder goes off | its message and "Now" |
 | An agent finishes or needs input | "Claude", "Finished" or "Needs input". A finished agent is only ever this: a few seconds, then the island goes back to what was live |
 | Another program's notice | whatever icon, title and text it sent |
 
 `omarchy-shell island demo <name>` previews one: `volume`, `brightness`,
-`plugged`, `unplugged`, `charged`, `bluetooth`, `disconnected`, `reminder`,
-`agent`, `agentdone`, `dictation`, `notify`, `activity`.
+`plugged`, `unplugged`, `charged`, `low`, `bluetooth`, `disconnected`,
+`reminder`, `agent`, `agentdone`, `dictation`, `microphone`, `camera`,
+`notify`, `activity`.
+
+## Microphone and camera
+
+While a program is recording from a microphone, an orange dot sits at the left
+end of the island; while one has a camera open, a green dot sits at the right
+end. They are there whatever else the island is showing, open or not, and with
+nothing else to show the island comes just far enough out of the notch to
+carry them. When either starts, the island names the program for a moment:
+"Firefox · Microphone".
+
+`omarchy-shell island status` lists the programs under `privacy`.
+
+- **Microphone** is any program with a recording stream in PipeWire. Not
+  counted: a stream recording what the speakers play (a screen recording's
+  system audio, a visualizer), level meters (the shell's own, pavucontrol),
+  the always-on processing that the platform lists in
+  `/usr/share/omarchy-platform/audio.json`, loopbacks and filters, and
+  Superwhisper, whose dictation the island already shows.
+- **Camera** is any program holding a capture device (`/dev/video*`) open,
+  whether it goes through PipeWire or straight to the device. A program that
+  goes through PipeWire is named when PipeWire says who it is, and is
+  otherwise just "Camera · In use".
+- A program that should never count, such as an effects chain that keeps the
+  microphone open all day, goes in `privacyIgnore`.
+
+The marks say that a device is open, not what is done with it, and they hide
+with the island under a fullscreen window.
 
 ## Using it
 
@@ -113,6 +145,7 @@ Shown for a few seconds, one at a time:
 - The tabs either side of the notch switch pages; a dot marks a live activity.
 - Scroll on the open island to change page, or on the compact island to change
   which live activity it shows.
+- Middle-click the island to play or pause the music.
 
 ## Commands
 
@@ -126,6 +159,8 @@ omarchy-shell island timerLabeled 4m Tea
 omarchy-shell island timerAdd 1m            # or -30s
 omarchy-shell island timerToggle            # pause / resume
 omarchy-shell island timerCancel
+
+omarchy-shell island playerNext             # follow the next player, when several have something loaded
 
 omarchy-shell island agentsClear
 omarchy-shell island activitiesClear
@@ -311,6 +346,13 @@ it is disabled, so note your `notchWidth` first.
   island asks the daemon nothing and never sees what was said.
 - **Battery** is UPower and **Bluetooth** is BlueZ, both through Quickshell.
   What they were doing when the shell started is not announced.
+- **The microphone mark** reads PipeWire's graph, through Quickshell, for
+  programs with a recording stream, and their names from that stream.
+- **The camera mark** runs `bin/island-camera-watch`, which watches the camera
+  devices with `inotifywait` for being opened and closed, and then looks in
+  `/proc` for which of your processes hold one. It opens no camera and reads
+  no frame, and the microphone mark hears no sound: both only know that a
+  device is in use, and by what.
 - **Other programs** reach it over the shell's own socket, which only your
   user can open. What they send is checked, cut to length and drawn as plain
   text; none of it is run.
@@ -342,7 +384,8 @@ Inline on the plugin's entry in `~/.config/omarchy/shell.json`:
 | `timerPresets` | `[1, 5, 10, 25]` | Minutes offered on the timer page (up to five). |
 | `timerNotify` | `true` | Also send a desktop notification when a timer ends. |
 | `osd` | `true` | Show volume and brightness in the island. |
-| `battery` | `true` | Announce the charger and a finished charge. |
+| `battery` | `true` | Announce the charger, a finished charge and a low battery. |
+| `batteryLow` | `[20, 10]` | Percentages at which a draining battery warns (up to four); `[]` for never. |
 | `bluetooth` | `true` | Announce devices connecting and disconnecting. |
 | `dictation` | `true` | Show Superwhisper recording and transcribing. |
 | `reminders` | `true` | Show Omarchy reminders. |
@@ -350,6 +393,9 @@ Inline on the plugin's entry in `~/.config/omarchy/shell.json`:
 | `reminderPresets` | `[5, 15, 30, 60]` | Minutes offered on the reminders page (the first four). |
 | `agents` | `true` | Show agents that finished or need input. |
 | `integrations` | `true` | Let other programs show events and activities. |
+| `microphone` | `true` | Mark the island while a program is recording from a microphone. |
+| `camera` | `true` | Mark the island while a program has a camera open. |
+| `privacyIgnore` | `[]` | Programs that never count as using either, by name or part of one: `["easyeffects"]`. |
 
 ### Lining it up with the notch
 
@@ -378,4 +424,5 @@ copy of its code, so an edit shows only after `omarchy restart shell`.
 `IslandModel.js` holds every decision that does not need a compositor;
 `sources/` the activities and what feeds the events; `views/` their compact
 and expanded faces; `IslandWindow.qml` the shape and its motion; `bin/island`
-what scripts and agents' hooks run.
+what scripts and agents' hooks run; `bin/island-camera-watch` what tells the
+island a camera is open.

@@ -266,12 +266,15 @@ answers a JSON object; these fields are part of the interface:
   "activities": [{"id": "backup", "title": "Backing up", "text": "photos", "progress": 40}],
   "agents": {"input": 0, "done": 1},
   "timer": {"status": "idle", "remainingMs": 0, "label": ""},
-  "media": {"available": true, "playing": true, "title": "…", "artist": "…"}
+  "media": {"available": true, "player": "Spotify", "players": 1, "playing": true, "title": "…", "artist": "…"},
+  "privacy": {"microphone": ["Firefox"], "camera": null}
 }
 ```
 
 `live` lists what is ongoing, most important first, and `compact` is the one
-beside the notch. Other fields are there for debugging and may change.
+beside the notch. `privacy` names the programs using the microphone and the
+camera, each `null` while nobody is; a program that gives no name is `""`.
+Other fields are there for debugging and may change.
 
 ## From another shell plugin
 

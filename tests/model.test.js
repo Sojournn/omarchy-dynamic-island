@@ -183,6 +183,40 @@ test("the island follows the player that is playing", () => {
   assert.equal(Model.pickPlayer([spotify, paused], Model.playerKey(spotify)), spotify)
 })
 
+test("a player picked by hand is followed until another starts or it goes", () => {
+  const spotify = { dbusName: "org.mpris.MediaPlayer2.spotify", trackTitle: "A", isPlaying: true }
+  const browser = { dbusName: "org.mpris.MediaPlayer2.chromium", trackTitle: "B", isPlaying: false }
+  const proxy = { dbusName: "org.mpris.MediaPlayer2.playerctld", trackTitle: "A", isPlaying: true }
+  const empty = { dbusName: "org.mpris.MediaPlayer2.idle", trackTitle: "", trackArtist: "", isPlaying: false }
+  const s = Model.playerKey(spotify)
+  const b = Model.playerKey(browser)
+
+  // The choices are the real players holding a track; a proxy only when alone.
+  assert.deepEqual(Model.playerChoices([spotify, browser, proxy, empty]), [s, b])
+  assert.deepEqual(Model.playerChoices([proxy]), [Model.playerKey(proxy)])
+  assert.deepEqual(Model.playerChoices(null), [])
+  assert.deepEqual(Model.playingKeys([spotify, browser, empty]), [s])
+
+  // A pick outranks the player that is playing.
+  assert.equal(Model.pickPlayer([spotify, browser], s, b), browser)
+  assert.equal(Model.pickPlayer([spotify, browser], s, ""), spotify)
+  assert.equal(Model.pickPlayer([spotify], s, b), spotify)
+
+  // It holds while nothing new starts, and while it plays itself.
+  assert.equal(Model.chosenPlayer(b, [s, b], [s], [s]), b)
+  assert.equal(Model.chosenPlayer(b, [s, b], [s], []), b)
+  assert.equal(Model.chosenPlayer(b, [s, b], [s], [s, b]), b)
+  // Another player starting while the pick is silent takes over again.
+  assert.equal(Model.chosenPlayer(b, [s, b], [], [s]), "")
+  // And a pick whose player is gone is no pick.
+  assert.equal(Model.chosenPlayer(b, [s], [s], [s]), "")
+  assert.equal(Model.chosenPlayer("", [s, b], [], [s]), "")
+
+  assert.equal(Model.shortLabel("Spotify", 12), "Spotify")
+  assert.equal(Model.shortLabel("VLC media player", 12), "VLC media p\u2026")
+  assert.equal(Model.shortLabel("a\nb", 12), "a b")
+})
+
 test("cover art loads only from a file or over https", () => {
   assert.equal(Model.safeArtUrl("file:///tmp/cover.png"), "file:///tmp/cover.png")
   assert.equal(Model.safeArtUrl("https://i.scdn.co/image/abc"), "https://i.scdn.co/image/abc")
@@ -312,6 +346,18 @@ test("settings fall back to defaults and stay in range", () => {
   assert.equal(odd.albumArt, false)
   assert.equal(odd.extra, undefined)
   assert.deepEqual(Model.normalizeSettings({ timerPresets: [] }).timerPresets, [1, 5, 10, 25])
+
+  // Battery levels: in range, each once, highest first; an empty list is "never".
+  assert.deepEqual(Model.normalizeSettings({ batteryLow: [10, 50, 0, 200, "x", 10, 5.4] }).batteryLow, [50, 10, 5])
+  assert.deepEqual(Model.normalizeSettings({ batteryLow: [] }).batteryLow, [])
+  assert.deepEqual(Model.normalizeSettings({ batteryLow: "20" }).batteryLow, [20, 10])
+  assert.deepEqual(Model.normalizeSettings({ batteryLow: [1, 2, 3, 4, 5, 6] }).batteryLow.length, 4)
+  // Ignored programs: text only, lowercased, bounded.
+  assert.deepEqual(Model.normalizeSettings({ privacyIgnore: ["EasyEffects", 3, "", "  OBS  ", "obs"] }).privacyIgnore, ["easyeffects", "obs"])
+  assert.deepEqual(Model.normalizeSettings({ privacyIgnore: "obs" }).privacyIgnore, [])
+  assert.equal(Model.normalizeSettings({ privacyIgnore: new Array(40).fill(0).map((_, i) => "app" + i) }).privacyIgnore.length, 16)
+  assert.equal(Model.normalizeSettings({ microphone: "no", camera: false }).microphone, true)
+  assert.equal(Model.normalizeSettings({ microphone: "no", camera: false }).camera, false)
 })
 
 test("the plugin finds its own entry in shell.json", () => {
@@ -507,6 +553,115 @@ test("the battery announces the charger and a finished charge, once each", () =>
   // A machine with no battery, or a first reading.
   assert.deepEqual(Model.batteryEvents({ present: false, onBattery: false }, reading(true, false, 50)), [])
   assert.deepEqual(Model.batteryEvents(null, reading(true, false, 50)), [])
+})
+
+test("a draining battery warns once at each level it passes", () => {
+  const draining = (percent) => ({ present: true, onBattery: true, full: false, percent })
+  const charging = (percent) => ({ present: true, onBattery: false, full: false, percent })
+  const levels = [20, 10]
+  assert.deepEqual(Model.batteryEvents(draining(21), draining(20), levels), ["low"])
+  assert.deepEqual(Model.batteryEvents(draining(20), draining(19), levels), [])
+  assert.deepEqual(Model.batteryEvents(draining(11), draining(10), levels), ["low"])
+  // Waking from sleep well below both: still one warning.
+  assert.deepEqual(Model.batteryEvents(draining(40), draining(5), levels), ["low"])
+  // Not while charging, not on the way up, not with the warning off.
+  assert.deepEqual(Model.batteryEvents(charging(21), charging(20), levels), [])
+  assert.deepEqual(Model.batteryEvents(draining(19), draining(21), levels), [])
+  assert.deepEqual(Model.batteryEvents(draining(21), draining(20), []), [])
+  assert.deepEqual(Model.batteryEvents(draining(21), draining(20)), [])
+  // Unplugging at a low level is the unplugging; the next level down still warns.
+  assert.deepEqual(Model.batteryEvents(charging(15), draining(15), levels), ["unplugged"])
+  // A reading with no level is not a level passed.
+  assert.deepEqual(Model.batteryEvents(draining(-1), draining(5), levels), [])
+})
+
+// ---------------------------------------------------------------- privacy
+
+test("a program recording from the microphone counts; the plumbing does not", () => {
+  // The hints a MacBook's platform package ships.
+  const hints = Model.parseAudioHints(JSON.stringify({
+    hidden: ["audio_effect\\.j[0-9]+-mic", "input\\.omarchy_asahi_mic", "(broken", 7],
+    replaced: [{ node: "effect_output\\.j[0-9]+-mic", by: "omarchy_asahi_mic" }, { node: "x" }, null]
+  }))
+  assert.equal(hints.hidden.length, 2)
+  assert.equal(hints.replaced.length, 1)
+  assert.equal(Model.audioHidden("audio_effect.j414-mic", hints, []), true)
+  // A whole name, not a part of one.
+  assert.equal(Model.audioHidden("my-audio_effect.j414-mic-app", hints, []), false)
+  assert.equal(Model.audioHidden("effect_output.j414-mic", hints, ["omarchy_asahi_mic"]), true)
+  assert.equal(Model.audioHidden("effect_output.j414-mic", hints, ["something_else"]), false)
+  assert.equal(Model.audioHidden("firefox", hints, []), false)
+  for (const bad of ["", "nope", "[]", "null", '{"hidden": "x"}']) {
+    assert.deepEqual(Model.parseAudioHints(bad), { hidden: [], replaced: [] })
+  }
+
+  const streams = [
+    { name: "audio_effect.j414-mic" },
+    { name: "input.omarchy_asahi_mic" },
+    { name: "Firefox", app: "Firefox", binary: "firefox" },
+    { name: "parecord", app: "parecord", captureSink: true },
+    { name: "cava", app: "cava", fromSink: true },
+    { name: "capture.rnnoise", linked: true },
+    { name: "x", app: "PulseAudio Volume Control", media: "Peak detect" },
+    { name: "quickshell-peak-monitor" },
+    { name: "Chromium input", app: "Chromium input" }
+  ]
+  const names = streams.map((stream) => stream.name)
+  assert.deepEqual(Model.microphoneApps(streams, hints, names, []), ["Firefox", "Chromium"])
+  assert.deepEqual(Model.microphoneApps(streams, hints, names, ["firefox"]), ["Chromium"])
+  // Without the platform's hints its always-on streams would count, nameless.
+  assert.deepEqual(Model.microphoneApps(streams.slice(0, 2), Model.parseAudioHints(""), names, []), [""])
+  // A program that gives no name still counts: something is listening.
+  assert.deepEqual(Model.microphoneApps([{ name: "alsa_capture.something" }], hints, [], []), [""])
+  assert.deepEqual(Model.microphoneApps(null, hints, [], []), [])
+  assert.equal(Model.firstLabel(["", "Zoom"]), "Zoom")
+  assert.equal(Model.firstLabel([""]), "")
+  assert.equal(Model.firstLabel(null), "")
+})
+
+test("the camera's holders are named, and PipeWire stands for whoever is behind it", () => {
+  assert.deepEqual(Model.cameraHolders("firefox\tpipewire\tfirefox"), ["firefox", "pipewire"])
+  assert.deepEqual(Model.cameraHolders(""), [])
+  assert.deepEqual(Model.cameraHolders(null), [])
+  assert.deepEqual(Model.cameraHolders("a\u0007b\t" + "x".repeat(200)), ["a b", "x".repeat(40)])
+  assert.equal(Model.cameraHolders(new Array(50).fill(0).map((_, i) => "p" + i).join("\t")).length, 8)
+
+  assert.deepEqual(Model.cameraApps(["ffmpeg", "obs"], [], []), ["FFmpeg", "OBS"])
+  assert.deepEqual(Model.cameraApps(["ffmpeg", "obs"], [], ["obs"]), ["FFmpeg"])
+  assert.deepEqual(Model.cameraApps(["pipewire"], ["Firefox"], []), ["Firefox"])
+  // PipeWire holding the camera for nobody it can name is still the camera in use.
+  assert.deepEqual(Model.cameraApps(["pipewire"], [], []), [""])
+  assert.deepEqual(Model.cameraApps(["pipewire"], ["Firefox"], ["firefox"]), [""])
+  assert.deepEqual(Model.cameraApps([], ["Firefox"], []), [])
+  assert.deepEqual(Model.cameraApps(null, null, null), [])
+})
+
+test("a program is called what people call it", () => {
+  assert.equal(Model.appLabel("firefox"), "Firefox")
+  assert.equal(Model.appLabel("Chromium input"), "Chromium")
+  assert.equal(Model.appLabel("Google Chrome input"), "Chrome")
+  assert.equal(Model.appLabel("/usr/bin/obs"), "OBS")
+  assert.equal(Model.appLabel("gpu-screen-reco"), "Screen recorder")
+  assert.equal(Model.appLabel("ALSA plug-in [superwhisper]"), "Superwhisper")
+  assert.equal(Model.appLabel("pw-record"), "pw-record")
+  assert.equal(Model.appLabel("Zoom Workplace"), "Zoom Workplace")
+  // Whatever a program calls itself, it is one bounded line of plain text.
+  assert.equal(Model.appLabel("<b>evil</b>\nsecond line that goes on and on"), "<b>evil</b> second line")
+  assert.equal(Model.appLabel("A/B Tester"), "A/B Tester")
+  assert.equal(Model.appLabel(""), "")
+  assert.equal(Model.appLabel(null), "")
+})
+
+test("the camera watcher answers once and exits", (t) => {
+  const { spawnSync } = require("node:child_process")
+  const script = path.join(root, "bin", "island-camera-watch")
+  assert.equal(spawnSync("bash", ["-n", script]).status, 0)
+  if (spawnSync("bash", ["-c", "command -v udevadm && command -v find"]).status !== 0) return t.skip("no udevadm or find here")
+  const run = spawnSync(script, ["--once"], { encoding: "utf8", timeout: 10000 })
+  assert.equal(run.status, 0, run.stderr)
+  // One line: the holders' names, or nothing when no camera is in use.
+  assert.equal(run.stdout.split("\n").length, 2)
+  assert.doesNotMatch(run.stdout, /[\u0000-\u0008]/)
 })
 
 // -------------------------------------------------------------- dictation
@@ -1042,7 +1197,8 @@ test("nothing in the plugin runs text through a shell", () => {
 test("every string the QML asks for is in the English catalog", () => {
   const catalog = JSON.parse(fs.readFileSync(path.join(root, "i18n", "en.json"), "utf8"))
   // Keys the QML builds at run time rather than writing out.
-  const wanted = new Set(["battery.plugged", "battery.unplugged", "battery.charged"])
+  const wanted = new Set(["battery.plugged", "battery.unplugged", "battery.charged", "battery.low",
+    "privacy.microphone", "privacy.camera"])
   for (const file of qmlFiles(root)) {
     const source = fs.readFileSync(file, "utf8")
     for (const match of source.matchAll(/\.t\("([a-zA-Z.]+)"\)/g)) wanted.add(match[1])
@@ -1099,6 +1255,14 @@ test("the README documents every setting and only real demos", () => {
   assert.ok(demos.length >= 10)
   for (const demo of demos) assert.ok(service.includes(`sample === "${demo}"`), `demo ${demo} exists`)
   for (const page of Model.PAGES) assert.match(readme, new RegExp("\\b" + page + "\\b"))
+  // Every command the README shows is one the island answers.
+  const commands = new Set([...readme.matchAll(/omarchy-shell island ([a-zA-Z]+)/g)].map((match) => match[1]))
+  assert.ok(commands.has("playerNext"))
+  for (const command of commands) assert.match(service, new RegExp("function " + command + "\\("), `island answers ${command}`)
+  // The marks are documented where the code makes them.
+  assert.match(readme, /## Microphone and camera/)
+  assert.match(integrationGuide, /"privacy": \{"microphone"/)
+  assert.ok(service.includes("privacy: {"))
 })
 
 test("the README's uninstall filter removes the island's hooks and nothing else", () => {

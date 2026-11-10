@@ -1,0 +1,134 @@
+#!/bin/bash
+#
+# island-camera-watch: say which programs have a camera open.
+#
+# Prints one line each time the answer changes: the programs' names separated
+# by tabs, or an empty line when no camera is in use. The island runs this and
+# reads the lines; nothing here looks at what a camera sees.
+#
+# A camera is a /dev/video* device that udev marks as able to capture, which
+# leaves out video decoders and the metadata node a webcam also registers.
+# Nothing holds a camera open while it is idle, so "in use" is a process with
+# one of those devices among its open files. inotify reports each open and
+# close, and that is the cue to look; with no inotify-tools the script looks
+# every few seconds instead.
+#
+#   island-camera-watch          watch until stopped
+#   island-camera-watch --once   print the current answer and exit
+
+set -u
+
+cameras() {
+  local device capabilities
+  for device in /dev/video*; do
+    [[ -c $device ]] || continue
+    capabilities=$(udevadm info --query=property --property=ID_V4L_CAPABILITIES --value --name="$device" 2>/dev/null) || continue
+    [[ $capabilities == *:capture:* ]] && printf '%s\n' "$device"
+  done
+}
+
+# The names of the processes holding one of the given devices open, sorted,
+# each once, joined by tabs. Only this user's processes can be read, and they
+# are the ones that matter here.
+holders() {
+  local target path pid name
+  local -A seen=()
+  local -a names=()
+  (( $# > 0 )) || return 0
+  while IFS=$'\t' read -r target path; do
+    local wanted=0 device
+    for device in "$@"; do
+      [[ $target == "$device" ]] && wanted=1
+    done
+    (( wanted )) || continue
+    pid=${path#/proc/}
+    pid=${pid%%/*}
+    name=""
+    read -r name 2>/dev/null <"/proc/$pid/comm" || continue
+    [[ -n $name && -z ${seen[$name]:-} ]] || continue
+    seen[$name]=1
+    names+=("$name")
+  done < <(find /proc/[0-9]*/fd -maxdepth 1 -type l -lname '/dev/video*' -printf '%l\t%p\n' 2>/dev/null)
+  (( ${#names[@]} > 0 )) || return 0
+  printf '%s\n' "${names[@]}" | LC_ALL=C sort | paste -sd $'\t' -
+}
+
+devices=()
+last=""
+said=0
+
+report() {
+  local now
+  now=$(holders "${devices[@]}")
+  if (( ! said )) || [[ $now != "$last" ]]; then
+    printf '%s\n' "$now"
+    last=$now
+    said=1
+  fi
+}
+
+if [[ ${1:-} == "--once" ]]; then
+  mapfile -t devices < <(cameras)
+  report
+  exit 0
+fi
+
+watcher=""
+
+stop_watcher() {
+  [[ -n $watcher ]] && kill "$watcher" 2>/dev/null
+  watcher=""
+}
+
+trap 'stop_watcher; exit 0' TERM INT HUP
+trap 'stop_watcher' EXIT
+
+# Waits without holding up the traps above.
+pause() {
+  sleep "$1" &
+  wait $! 2>/dev/null
+}
+
+while :; do
+  mapfile -t devices < <(cameras)
+
+  if (( ${#devices[@]} == 0 )); then
+    report
+    # No camera yet: one may still be plugged in.
+    pause 20
+    continue
+  fi
+
+  report
+
+  if ! command -v inotifywait >/dev/null 2>&1; then
+    pause 3
+    continue
+  fi
+
+  # setpriv ends the watcher with this script even if the script is killed
+  # outright and never reaches its trap.
+  coproc WATCH { exec setpriv --pdeathsig TERM inotifywait -m -q -e open -e close --format '%w' "${devices[@]}" 2>/dev/null; }
+  watcher=$WATCH_PID
+  events=${WATCH[0]}
+
+  while :; do
+    if read -r -t 20 -u "$events" _; then
+      # A program opening a camera touches it several times; let it settle.
+      while read -r -t 0.3 -u "$events" _; do :; done
+      report
+    elif (( $? > 128 )); then
+      # Quiet for a while. Look anyway, and notice a camera plugged in or out.
+      report
+      mapfile -t current < <(cameras)
+      [[ ${current[*]} == "${devices[*]}" ]] || break
+    else
+      # The watcher went away.
+      pause 2
+      break
+    fi
+  done
+
+  stop_watcher
+  wait 2>/dev/null
+done

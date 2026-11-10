@@ -41,7 +41,14 @@ Item {
   readonly property color urgent: Model.readableOnBlack(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.18)
     ? Commons.Color.urgent : "#ff5f57"
 
+  // A microphone in use is marked in orange and a camera in green, as phones
+  // and laptops have taught everyone to read them.
+  readonly property color microphoneColor: "#ff9f0a"
+  readonly property color cameraColor: "#30d158"
+
   function toneColor(tone) {
+    if (tone === "microphone") return microphoneColor
+    if (tone === "camera") return cameraColor
     if (tone === "accent") return accent
     if (tone === "urgent") return urgent
     if (tone === "muted") return inkSecondary
@@ -192,13 +199,15 @@ Item {
   BatterySource {
     id: batterySource
     active: root.settings.battery
+    lowLevels: root.settings.batteryLow
     onChanged: function(kind, percent) {
       var level = percent >= 0 ? catalog.t("event.percent").arg(I18n.formatNumber(percent)) : ""
       root.showEvent({
         kind: "battery",
-        glyph: kind === "plugged" ? Model.glyphs.batteryCharging : kind === "charged" ? Model.glyphs.batteryFull : Model.glyphs.battery,
-        tone: kind === "unplugged" ? "muted" : "accent",
-        lead: catalog.t("battery." + kind), trail: level, fraction: -1, duration: 3600
+        glyph: kind === "plugged" ? Model.glyphs.batteryCharging : kind === "charged" ? Model.glyphs.batteryFull
+          : kind === "low" ? Model.glyphs.batteryAlert : Model.glyphs.battery,
+        tone: kind === "low" ? "urgent" : kind === "unplugged" ? "muted" : "accent",
+        lead: catalog.t("battery." + kind), trail: level, fraction: -1, duration: kind === "low" ? 5000 : 3600
       })
     }
   }
@@ -225,6 +234,31 @@ Item {
     active: root.settings.integrations
   }
 
+  PrivacySource {
+    id: privacySource
+    microphoneEnabled: root.settings.microphone
+    cameraEnabled: root.settings.camera
+    // Superwhisper's recording is the dictation, which the island shows as
+    // one; it is not also a program listening in.
+    ignore: root.settings.dictation ? root.settings.privacyIgnore.concat(["superwhisper"]) : root.settings.privacyIgnore
+    microphoneHeld: dictationSource.live
+    onStarted: function(kind, label) { root.announcePrivacy(kind, label) }
+  }
+
+  // Says which program it is as the microphone or camera comes into use. The
+  // mark at the end of the island (IslandWindow.qml) stays for as long as it
+  // is; this is only the introduction.
+  function announcePrivacy(kind, label) {
+    // A recording that takes the microphone has just been started by hand.
+    if (kind === "microphone" && recordingSource.live) return
+    showEvent({
+      kind: kind, glyph: kind === "camera" ? Model.glyphs.video : Model.glyphs.microphone, tone: kind,
+      lead: label !== "" ? label : catalog.t("privacy." + kind),
+      trail: label !== "" ? catalog.t("privacy." + kind) : catalog.t("privacy.inUse"),
+      fraction: -1, duration: 3200
+    })
+  }
+
   readonly property var media: mediaSource
   readonly property var timer: timerSource
   readonly property var recording: recordingSource
@@ -232,6 +266,7 @@ Item {
   readonly property var reminders: remindersSource
   readonly property var agents: agentsSource
   readonly property var activities: activitiesSource
+  readonly property var privacy: privacySource
 
   // What is live, most important first, and which of those the compact island
   // shows: the newest to go live, until the wheel picks another.
@@ -356,6 +391,9 @@ Item {
     else if (sample === "plugged" || sample === "battery") batterySource.changed("plugged", 54)
     else if (sample === "unplugged") batterySource.changed("unplugged", 54)
     else if (sample === "charged") batterySource.changed("charged", 100)
+    else if (sample === "low") batterySource.changed("low", 20)
+    else if (sample === "microphone") privacySource.demo("microphone")
+    else if (sample === "camera") privacySource.demo("camera")
     else if (sample === "bluetooth") bluetoothSource.changed(true, "AirPods Pro", 82)
     else if (sample === "disconnected") bluetoothSource.changed(false, "AirPods Pro", -1)
     else if (sample === "reminder") remindersSource.fired("Stand up and stretch")
@@ -487,6 +525,8 @@ Item {
       pinned: pinned,
       media: {
         available: mediaSource.available,
+        player: mediaSource.identity,
+        players: mediaSource.choices.length,
         playing: mediaSource.playing,
         title: mediaSource.title,
         artist: mediaSource.artist
@@ -507,6 +547,10 @@ Item {
       activities: activitiesSource.items.map(function(item) {
         return { id: item.id, title: item.title, text: item.text, progress: item.fraction >= 0 ? Math.round(item.fraction * 100) : null }
       }),
+      privacy: {
+        microphone: privacySource.microphoneOn && privacySource.microphoneBusy ? privacySource.microphoneApps : null,
+        camera: privacySource.cameraOn && privacySource.cameraBusy ? privacySource.cameraApps : null
+      },
       event: event ? event.kind : "",
       focusedWindow: agentsSource.focusedWindow,
       readyScreens: readyScreens
@@ -572,6 +616,12 @@ Item {
       timerSource.cancel()
       timerSource.dismiss()
       return timerSource.status
+    }
+
+    // Follow the next player, when more than one has something loaded.
+    function playerNext(): string {
+      mediaSource.switchPlayer(1)
+      return mediaSource.identity !== "" ? mediaSource.identity : "no player"
     }
 
     // ---- for other programs; INTEGRATION.md documents these four ----

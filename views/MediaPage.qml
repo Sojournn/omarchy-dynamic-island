@@ -198,35 +198,54 @@ Reveal {
       }
     }
 
-    Row {
-      anchors.horizontalCenter: parent.horizontalCenter
-      spacing: 14
+    Item {
+      width: parent.width
+      height: 38
 
-      IslandButton {
-        anchors.verticalCenter: parent.verticalCenter
-        glyph: Model.glyphs.previous
-        size: 32
-        restAlpha: 0
-        enabled: root.media.canPrevious
-        onClicked: root.media.previous()
+      Row {
+        anchors.centerIn: parent
+        spacing: 14
+
+        IslandButton {
+          anchors.verticalCenter: parent.verticalCenter
+          glyph: Model.glyphs.previous
+          size: 32
+          restAlpha: 0
+          enabled: root.media.canPrevious
+          onClicked: root.media.previous()
+        }
+
+        IslandButton {
+          anchors.verticalCenter: parent.verticalCenter
+          glyph: root.media.playing ? Model.glyphs.pause : Model.glyphs.play
+          size: 38
+          glyphSize: Style.font.display
+          enabled: root.media.canToggle
+          onClicked: root.media.toggle()
+        }
+
+        IslandButton {
+          anchors.verticalCenter: parent.verticalCenter
+          glyph: Model.glyphs.next
+          size: 32
+          restAlpha: 0
+          enabled: root.media.canNext
+          onClicked: root.media.next()
+        }
       }
 
+      // With more than one player about, which one this is, and a way to the
+      // next.
       IslandButton {
+        visible: root.media.choices.length > 1
+        anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        glyph: root.media.playing ? Model.glyphs.pause : Model.glyphs.play
-        size: 38
-        glyphSize: Style.font.display
-        enabled: root.media.canToggle
-        onClicked: root.media.toggle()
-      }
-
-      IslandButton {
-        anchors.verticalCenter: parent.verticalCenter
-        glyph: Model.glyphs.next
-        size: 32
-        restAlpha: 0
-        enabled: root.media.canNext
-        onClicked: root.media.next()
+        glyph: Model.glyphs.swap
+        label: Model.shortLabel(root.media.identity, 12)
+        size: 26
+        glyphSize: Style.font.body
+        restAlpha: 0.08
+        onClicked: root.media.switchPlayer(1)
       }
     }
   }
